@@ -193,34 +193,68 @@ def main():
     if not URL:
         print("❌ No URL provided by GitHub Actions!", flush=True)
         sys.exit(1)
-        
+
+    cookies_args = []
+    if os.path.exists('cookies.txt') and os.path.getsize('cookies.txt') > 0:
+        cookies_args = ['--cookies', 'cookies.txt']
+
+    # ── Phase 1: metadata only (comments/description/info) — runs ONCE. ──
+    # This is the expensive, slow-paginated part (comment threads etc).
+    # Nothing after this point ever repeats it, even on download retries.
+    if PLATFORM == 'youtube':
+        meta_opts = [
+            sys.executable, '-m', 'yt_dlp',
+            '--output', 'temp_download.%(ext)s',
+            '--no-check-certificates',
+            '--verbose',
+            '--impersonate', 'chrome',
+            '--retries', '10',
+            '--socket-timeout', '30',
+            '--force-ipv4',
+            '--legacy-server-connect',
+            '--no-playlist',
+            '--skip-download',
+            '--write-description',
+            '--write-info-json',
+            '--write-comments',
+            '--extractor-args', 'youtube:max-comments=1000',
+            '--js-runtimes', 'node',
+            '--remote-components', 'ejs:github',
+            '--sleep-requests', '1',
+            *cookies_args,
+            URL,
+        ]
+        print("⏳ Phase 1/2: fetching metadata, description, comments...", flush=True)
+        try:
+            subprocess.run(meta_opts, check=True)
+        except subprocess.CalledProcessError:
+            print("❌ Metadata fetch failed.", flush=True)
+            send_text_to_bale("❌ خطا در دریافت اطلاعات ویدیو. لطفاً بعداً دوباره امتحان کنید.")
+            sys.exit(1)
+
+    # ── Phase 2: actual media download — this is the part that retries. ──
     ydl_opts = [
         sys.executable, '-m', 'yt_dlp',
         '--output', 'temp_download.%(ext)s',
         '--no-check-certificates',
         '--verbose',
-        '--impersonate', 'chrome',
-        '--retries', '10', 
-        '--fragment-retries', '10', 
+        '--retries', '10',
+        '--fragment-retries', '10',
         '--socket-timeout', '30',
-        '--force-ipv4', 
+        '--force-ipv4',
         '--legacy-server-connect',
-        '--no-playlist',
-        '--write-description',
         '--sleep-requests', '1',
         '--sleep-subtitles', '5',
-        '--retry-sleep', 'extractor:linear=1:10:2'
+        '--retry-sleep', 'extractor:linear=1:10:2',
     ]
 
     if PLATFORM == 'youtube':
-        ydl_opts.extend([
-            '--js-runtimes', 'node',
-            '--remote-components', 'ejs:github',
-            '--write-info-json',  
-            '--write-comments',   
-            '--extractor-args', 'youtube:max-comments=1000'
-        ])
-    
+        # Reuse the metadata already fetched in Phase 1 — no re-extraction,
+        # no re-fetching comments, no re-solving JS challenges.
+        ydl_opts.extend(['--load-info-json', 'temp_download.info.json'])
+    else:
+        ydl_opts.extend(['--impersonate', 'chrome', '--no-playlist', '--write-description'])
+
     if FORMAT == 'mp3':
         ydl_opts.extend([
             '--format', 'bestaudio/best',
@@ -246,30 +280,28 @@ def main():
                 '--embed-subs',
                 '--compat-options', 'no-keep-subs'
             ])
-    
-    if os.path.exists('cookies.txt') and os.path.getsize('cookies.txt') > 0:
-        ydl_opts.extend(['--cookies', 'cookies.txt'])
 
-    ydl_opts.append(URL)
+    ydl_opts.extend(cookies_args)
+    ydl_opts.append(URL)  # required even with --load-info-json
 
-    max_attempts = 2
+    max_attempts = 3
     last_error = None
     for attempt in range(1, max_attempts + 1):
         try:
-            print(f"⏳ yt-dlp attempt {attempt}/{max_attempts}...", flush=True)
+            print(f"⏳ Phase 2/2: downloading media (attempt {attempt}/{max_attempts})...", flush=True)
             subprocess.run(ydl_opts, check=True)
             last_error = None
             break
         except subprocess.CalledProcessError as e:
             last_error = e
-            print(f"❌ yt-dlp attempt {attempt}/{max_attempts} failed.", flush=True)
+            print(f"❌ Download attempt {attempt}/{max_attempts} failed.", flush=True)
             if attempt < max_attempts:
                 backoff = 15 * attempt
-                print(f"⏳ Retrying in {backoff}s...", flush=True)
+                print(f"⏳ Retrying in {backoff}s (metadata/comments will NOT be re-fetched)...", flush=True)
                 time.sleep(backoff)
 
     if last_error is not None:
-        print("❌ yt-dlp crashed after all retries. Check the verbose logs above.", flush=True)
+        print("❌ Download crashed after all retries. Check the verbose logs above.", flush=True)
         send_text_to_bale("❌ خطا در دانلود ویدیو پس از چند تلاش. لطفاً بعداً دوباره امتحان کنید.")
         sys.exit(1)
     
