@@ -35,8 +35,7 @@ def api_call(method, payload):
     try:
         r = requests.post(f"{BALE_API}/{method}", json=payload, timeout=20)
         return r.json() if r.content else {}
-    except Exception as e:
-        return {}
+    except Exception: return {}
 
 def send_message(chat_id, text, keyboard=None):
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
@@ -77,12 +76,7 @@ def start_session(chat_id, url):
     SESSIONS[chat_id] = {
         "url": url, 
         "platform": platform,
-        "extras": {
-            "subs": True,
-            "comments": True,
-            "description": True,
-            "thumbnail": True
-        }
+        "extras": {"subs": True, "comments": True, "description": True, "thumbnail": True}
     }
     if platform: ask_format(chat_id)
     else: ask_platform(chat_id)
@@ -111,19 +105,16 @@ def ask_extras(chat_id, message_id):
     s = SESSIONS.get(chat_id)
     if not s: return
     e = s["extras"]
-    
     def check(key): return "✅" if e.get(key) else "❌"
 
     kb = []
-    # Only show subtitle option if it is a video (MP4)
     if s.get("format") == "mp4":
         kb.append([btn(f"{check('subs')} زیرنویس (Subtitles)", "toggle:subs")])
-    
     kb.append([
         btn(f"{check('comments')} کامنت‌ها", "toggle:comments"),
         btn(f"{check('description')} توضیحات", "toggle:description")
     ])
-    kb.append([btn(f"{check('thumbnail')} کاور / بندانگشتی", "toggle:thumbnail")])
+    kb.append([btn(f"{check('thumbnail')} (thumbnail) کاور", "toggle:thumbnail")])
     kb.append([btn("🚀 تایید و مرحله بعد", "confirm:extras")])
 
     text = "⚙️ **تنظیمات جانبی:**\nبا کلیک روی هر گزینه می‌توانید آن را فعال (✅) یا غیرفعال (❌) کنید. سپس روی مرحله بعد کلیک کنید:"
@@ -177,24 +168,19 @@ def handle_callback(cq):
     if kind == "plat":
         SESSIONS.setdefault(chat_id, {})["platform"] = value
         ask_format(chat_id, edit=message_id)
-
     elif kind == "fmt":
         s["format"] = value
         if value == "mp3":
             s["quality"] = None
             s["extras"]["subs"] = False
             ask_extras(chat_id, message_id)
-        else:
-            ask_quality(chat_id, message_id)
-
+        else: ask_quality(chat_id, message_id)
     elif kind == "q":
         s["quality"] = value
         ask_extras(chat_id, message_id)
-        
     elif kind == "toggle":
         s["extras"][value] = not s["extras"][value]
         ask_extras(chat_id, message_id)
-
     elif kind == "confirm":
         if value == "extras":
             ask_confirm(chat_id, message_id)
@@ -215,11 +201,12 @@ def handle_callback(cq):
             "GET_COMMENTS": "true" if e.get("comments") else "false",
             "GET_DESC": "true" if e.get("description") else "false",
             "GET_THUMBNAIL": "true" if e.get("thumbnail") else "false",
+            "MESSAGE_ID": str(message_id)
         }
         ok, info = trigger_workflow(inputs)
         SESSIONS.pop(chat_id, None)
         if ok:
-            edit_message(chat_id, message_id, "🚀 **عملیات شروع شد!** فایل‌ها به زودی ارسال میشن.")
+            edit_message(chat_id, message_id, "⏳ **در حال ارسال دستور به سرور...**")
         else:
             edit_message(chat_id, message_id, "❌ خطایی در شروع دانلود رخ داد. لطفاً دوباره تلاش کنید.")
 
