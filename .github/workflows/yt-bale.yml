@@ -52,6 +52,10 @@ on:
         options:
           - 'true'
           - 'false'
+      JOB_ID:
+        description: 'Internal job id (set by the bot, used for status callbacks)'
+        required: false
+        default: ''
 
 jobs:
   download_and_send:
@@ -91,3 +95,23 @@ jobs:
           GET_SUBS: ${{ github.event.inputs.GET_SUBS }}
           BALE_TOKEN: ${{ secrets.BALE_TOKEN }}
         run: python main.py
+
+      - name: Report result to bot
+        if: always()
+        env:
+          CALLBACK_URL: ${{ secrets.CALLBACK_URL }}
+          CALLBACK_SECRET: ${{ secrets.CALLBACK_SECRET }}
+          JOB_ID: ${{ github.event.inputs.JOB_ID }}
+          CHAT_ID: ${{ github.event.inputs.CHAT_ID }}
+          STATUS: ${{ job.status }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$CALLBACK_URL" ] || [ -z "$JOB_ID" ]; then
+            echo "No callback configured/no job id — skipping notify step."
+            exit 0
+          fi
+          curl -s -X POST "$CALLBACK_URL/callback/$CALLBACK_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg job_id "$JOB_ID" --arg chat_id "$CHAT_ID" --arg status "$STATUS" --arg run_url "$RUN_URL" \
+                  '{job_id:$job_id, chat_id:$chat_id, status:$status, run_url:$run_url}')" \
+            || echo "Callback POST failed (non-fatal)."
