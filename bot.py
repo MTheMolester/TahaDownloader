@@ -18,7 +18,6 @@ GITHUB_WORKFLOW_FILE = os.environ.get("GITHUB_WORKFLOW_FILE", "yt-bale.yml")
 GITHUB_REF = os.environ.get("GITHUB_REF", "main")
 YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY")
 
-# The Force Join variable!
 REQUIRED_CHANNEL = os.environ.get("REQUIRED_CHANNEL") 
 ALLOWED_USERS = {u.strip() for u in os.environ.get("ALLOWED_USERS", "").split(",") if u.strip()}
 
@@ -77,11 +76,10 @@ def trigger_workflow(inputs):
     r = requests.post(url, headers=headers, json=payload, timeout=20)
     return r.status_code == 204, r.text
 
-
 # ── Channel Membership Checker ──────────────────────────────────────────────
 def check_membership(user_id):
     if not REQUIRED_CHANNEL:
-        return True # Skips if you didn't add the env variable
+        return True 
         
     payload = {"chat_id": REQUIRED_CHANNEL, "user_id": user_id}
     try:
@@ -104,7 +102,6 @@ def force_join_message(chat_id, message_id=None):
     ]
     if message_id: edit_message(chat_id, message_id, text, kb)
     else: send_message(chat_id, text, kb)
-
 
 # ── YouTube API Helpers ─────────────────────────────────────────────────────
 def extract_yt_id(url):
@@ -273,15 +270,21 @@ def ask_confirm(chat_id, message_id):
 
 # ── Core Handlers ───────────────────────────────────────────────────────────
 def handle_message(msg):
+    # PREVENT CHANNEL MESSAGES FROM TRIGGERING THE BOT
+    chat_type = msg.get("chat", {}).get("type", "")
+    if chat_type != "private":
+        return 
+
     chat_id = str(msg["chat"]["id"])
+    user_id = str(msg.get("from", {}).get("id", chat_id))
     text = (msg.get("text") or "").strip()
 
-    if ALLOWED_USERS and chat_id not in ALLOWED_USERS:
+    if ALLOWED_USERS and user_id not in ALLOWED_USERS:
         send_message(chat_id, "🚫 شما مجاز به استفاده از این ربات نیستید.")
         return
 
-    # 1. FORCE JOIN CHECK FOR TEXT MESSAGES
-    if not check_membership(chat_id):
+    # Check for Force Join using the specific USER ID, not the chat ID
+    if not check_membership(user_id):
         force_join_message(chat_id)
         return
 
@@ -333,12 +336,12 @@ def handle_message(msg):
 
 def handle_callback(cq):
     chat_id = str(cq["message"]["chat"]["id"])
+    user_id = str(cq.get("from", {}).get("id", chat_id))
     message_id = cq["message"]["message_id"]
     data = cq.get("data", "")
     
-    # Check the "Verify Membership" button directly
     if data == "main:check_join":
-        if check_membership(chat_id):
+        if check_membership(user_id):
             answer_callback(cq["id"], "✅ عضویت شما تایید شد!", show_alert=True)
             send_main_menu(chat_id, message_id)
         else:
@@ -347,8 +350,7 @@ def handle_callback(cq):
 
     answer_callback(cq["id"])
 
-    # 2. FORCE JOIN CHECK FOR ALL OTHER BUTTON CLICKS
-    if not check_membership(chat_id):
+    if not check_membership(user_id):
         force_join_message(chat_id, message_id)
         return
 
@@ -431,13 +433,16 @@ def handle_callback(cq):
 def webhook():
     update = request.get_json(force=True, silent=True) or {}
     try:
+        # Prevent processing channel posts entirely
+        if "channel_post" in update: return jsonify({"ok": True})
+        
         if "callback_query" in update: handle_callback(update["callback_query"])
         elif "message" in update: handle_message(update["message"])
     except Exception: pass
     return jsonify({"ok": True})
 
 @app.route("/")
-def health(): return "Taha Downloader Complete V4 is running!", 200
+def health(): return "Taha Downloader Final V5 is running!", 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
