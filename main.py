@@ -220,7 +220,6 @@ def main():
             '--extractor-args', 'youtube:max-comments=1000',
             '--js-runtimes', 'node',
             '--remote-components', 'ejs:github',
-            '--sleep-requests', '1',
             *cookies_args,
             URL,
         ]
@@ -233,63 +232,69 @@ def main():
             sys.exit(1)
 
     # ── Phase 2: actual media download — this is the part that retries. ──
-    ydl_opts = [
-        sys.executable, '-m', 'yt_dlp',
-        '--output', 'temp_download.%(ext)s',
-        '--no-check-certificates',
-        '--verbose',
-        '--retries', '10',
-        '--fragment-retries', '10',
-        '--socket-timeout', '30',
-        '--force-ipv4',
-        '--legacy-server-connect',
-        '--sleep-requests', '1',
-        '--sleep-subtitles', '5',
-        '--retry-sleep', 'extractor:linear=1:10:2',
-    ]
-
-    if PLATFORM == 'youtube':
-        # Reuse the metadata already fetched in Phase 1 — no re-extraction,
-        # no re-fetching comments, no re-solving JS challenges.
-        ydl_opts.extend(['--load-info-json', 'temp_download.info.json'])
-    else:
-        ydl_opts.extend(['--impersonate', 'chrome', '--no-playlist', '--write-description'])
-
-    if FORMAT == 'mp3':
-        ydl_opts.extend([
-            '--format', 'bestaudio/best',
-            '--extract-audio',
-            '--audio-format', 'mp3',
-            '--audio-quality', '0', 
-            '--embed-metadata',         
-            '--embed-thumbnail',        
-            '--convert-thumbnails', 'jpg' 
-        ])
-    else:
-        ydl_opts.extend([
-            '--format', DYNAMIC_QUALITY_STRING, 
-            '--merge-output-format', 'mp4',
-            '--embed-metadata'
-        ])
-        
-        if GET_SUBS:
-            ydl_opts.extend([
-                '--write-subs',
-                '--write-auto-subs',
-                '--sub-langs', 'fa,en',
-                '--embed-subs',
-                '--compat-options', 'no-keep-subs'
+    def build_download_opts(include_subs):
+        opts = [
+            sys.executable, '-m', 'yt_dlp',
+            '--output', 'temp_download.%(ext)s',
+            '--no-check-certificates',
+            '--verbose',
+            '--ignore-errors',  # a failed subtitle track shouldn't kill the whole download
+            '--retries', '10',
+            '--fragment-retries', '10',
+            '--socket-timeout', '30',
+            '--force-ipv4',
+            '--legacy-server-connect',
+            '--sleep-subtitles', '5',
+            '--retry-sleep', 'extractor:linear=1:10:2',
+        ]
+        if PLATFORM == 'youtube':
+            # Reuse Phase 1's metadata — no re-fetching comments. Keep the JS
+            # runtime available too: if anything forces yt-dlp to fall back to
+            # live re-extraction (e.g. a subtitle error), it still needs this
+            # to solve YouTube's challenge and get real video formats.
+            opts.extend([
+                '--load-info-json', 'temp_download.info.json',
+                '--js-runtimes', 'node',
+                '--remote-components', 'ejs:github',
             ])
+        else:
+            opts.extend(['--impersonate', 'chrome', '--no-playlist', '--write-description'])
 
-    ydl_opts.extend(cookies_args)
-    ydl_opts.append(URL)  # required even with --load-info-json
+        if FORMAT == 'mp3':
+            opts.extend([
+                '--format', 'bestaudio/best',
+                '--extract-audio',
+                '--audio-format', 'mp3',
+                '--audio-quality', '0',
+                '--embed-metadata',
+                '--embed-thumbnail',
+                '--convert-thumbnails', 'jpg'
+            ])
+        else:
+            opts.extend([
+                '--format', DYNAMIC_QUALITY_STRING,
+                '--merge-output-format', 'mp4',
+                '--embed-metadata'
+            ])
+            if GET_SUBS and include_subs:
+                opts.extend([
+                    '--write-subs',
+                    '--write-auto-subs',
+                    '--sub-langs', 'fa,en',
+                    '--embed-subs',
+                    '--compat-options', 'no-keep-subs'
+                ])
 
-    max_attempts = 3
+        opts.extend(cookies_args)
+        opts.append(URL)  # required even with --load-info-json
+        return opts
+
+    max_attempts = 2
     last_error = None
     for attempt in range(1, max_attempts + 1):
         try:
             print(f"⏳ Phase 2/2: downloading media (attempt {attempt}/{max_attempts})...", flush=True)
-            subprocess.run(ydl_opts, check=True)
+            subprocess.run(build_download_opts(include_subs=True), check=True)
             last_error = None
             break
         except subprocess.CalledProcessError as e:
@@ -299,6 +304,16 @@ def main():
                 backoff = 15 * attempt
                 print(f"⏳ Retrying in {backoff}s (metadata/comments will NOT be re-fetched)...", flush=True)
                 time.sleep(backoff)
+
+    # Safety net: if subtitles are the reason it keeps failing, don't let
+    # that block delivering the actual video — try once more with no subs.
+    if last_error is not None and FORMAT != 'mp3' and GET_SUBS:
+        print("⏳ Still failing — retrying once with subtitles disabled to guarantee delivery...", flush=True)
+        try:
+            subprocess.run(build_download_opts(include_subs=False), check=True)
+            last_error = None
+        except subprocess.CalledProcessError as e:
+            last_error = e
 
     if last_error is not None:
         print("❌ Download crashed after all retries. Check the verbose logs above.", flush=True)
