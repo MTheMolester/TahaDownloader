@@ -166,12 +166,10 @@ def send_to_bale(file_path, part, total):
     
     url = f"https://tapi.bale.ai/bot{BALE_TOKEN}/{endpoint}"
     filename = Path(file_path).name
-    actual_size_mb = os.path.getsize(file_path) / (1024 * 1024)
     
     # Farsi caption formatting
     caption_text = f"📂 {filename}\n(بخش {part} از {total})"
     
-    print(f"Uploading {filename} ({actual_size_mb:.2f} MB) via {endpoint}...", flush=True)
     with open(file_path, 'rb') as f:
         for attempt in range(4):
             try:
@@ -183,7 +181,6 @@ def send_to_bale(file_path, part, total):
                     verify=False 
                 )
                 response.raise_for_status()
-                print(f"✅ Successfully sent {filename}", flush=True)
                 break
             except requests.exceptions.RequestException as e:
                 print(f"❌ Upload attempt {attempt+1} failed: {e}", flush=True)
@@ -191,134 +188,67 @@ def send_to_bale(file_path, part, total):
 
 def main():
     if not URL:
-        print("❌ No URL provided by GitHub Actions!", flush=True)
-        sys.exit(1)
+        return
+        
+    ydl_opts = [
+        sys.executable, '-m', 'yt_dlp',
+        '--output', 'temp_download.%(ext)s',
+        '--no-check-certificates',
+        '--impersonate', 'chrome',
+        '--retries', '10', 
+        '--fragment-retries', '10', 
+        '--socket-timeout', '30',
+        '--force-ipv4', 
+        '--legacy-server-connect',
+        '--no-playlist',
+        '--write-description'
+    ]
 
-    cookies_args = []
-    if os.path.exists('cookies.txt') and os.path.getsize('cookies.txt') > 0:
-        cookies_args = ['--cookies', 'cookies.txt']
-
-    # ── Phase 1: metadata only (comments/description/info) — runs ONCE. ──
-    # This is the expensive, slow-paginated part (comment threads etc).
-    # Nothing after this point ever repeats it, even on download retries.
     if PLATFORM == 'youtube':
-        meta_opts = [
-            sys.executable, '-m', 'yt_dlp',
-            '--output', 'temp_download.%(ext)s',
-            '--no-check-certificates',
-            '--verbose',
-            '--impersonate', 'chrome',
-            '--retries', '10',
-            '--socket-timeout', '30',
-            '--force-ipv4',
-            '--legacy-server-connect',
-            '--no-playlist',
-            '--skip-download',
-            '--write-description',
-            '--write-info-json',
-            '--write-comments',
-            '--extractor-args', 'youtube:max-comments=1000',
+        ydl_opts.extend([
             '--js-runtimes', 'node',
             '--remote-components', 'ejs:github',
-            *cookies_args,
-            URL,
-        ]
-        print("⏳ Phase 1/2: fetching metadata, description, comments...", flush=True)
-        try:
-            subprocess.run(meta_opts, check=True)
-        except subprocess.CalledProcessError:
-            print("❌ Metadata fetch failed.", flush=True)
-            send_text_to_bale("❌ خطا در دریافت اطلاعات ویدیو. لطفاً بعداً دوباره امتحان کنید.")
-            sys.exit(1)
-
-    # ── Phase 2: actual media download — this is the part that retries. ──
-    def build_download_opts(include_subs):
-        opts = [
-            sys.executable, '-m', 'yt_dlp',
-            '--output', 'temp_download.%(ext)s',
-            '--no-check-certificates',
-            '--verbose',
-            '--ignore-errors',  # a failed subtitle track shouldn't kill the whole download
-            '--retries', '10',
-            '--fragment-retries', '10',
-            '--socket-timeout', '30',
-            '--force-ipv4',
-            '--legacy-server-connect',
-            '--sleep-subtitles', '5',
-            '--retry-sleep', 'extractor:linear=1:10:2',
-        ]
-        if PLATFORM == 'youtube':
-            # Reuse Phase 1's metadata — no re-fetching comments. Keep the JS
-            # runtime available too: if anything forces yt-dlp to fall back to
-            # live re-extraction (e.g. a subtitle error), it still needs this
-            # to solve YouTube's challenge and get real video formats.
-            opts.extend([
-                '--load-info-json', 'temp_download.info.json',
-                '--js-runtimes', 'node',
-                '--remote-components', 'ejs:github',
+            '--write-info-json',  
+            '--write-comments',   
+            '--extractor-args', 'youtube:max-comments=1000'
+        ])
+    
+    if FORMAT == 'mp3':
+        ydl_opts.extend([
+            '--format', 'bestaudio/best',
+            '--extract-audio',
+            '--audio-format', 'mp3',
+            '--audio-quality', '0', 
+            '--embed-metadata',         
+            '--embed-thumbnail',        
+            '--convert-thumbnails', 'jpg' 
+        ])
+    else:
+        ydl_opts.extend([
+            '--format', DYNAMIC_QUALITY_STRING, 
+            '--merge-output-format', 'mp4',
+            '--embed-metadata'
+        ])
+        
+        if GET_SUBS:
+            ydl_opts.extend([
+                '--write-subs',
+                '--write-auto-subs',
+                '--sub-langs', 'fa.*,en.*',
+                '--embed-subs',
+                '--compat-options', 'no-keep-subs'
             ])
-        else:
-            opts.extend(['--impersonate', 'chrome', '--no-playlist', '--write-description'])
+    
+    if os.path.exists('cookies.txt') and os.path.getsize('cookies.txt') > 0:
+        ydl_opts.extend(['--cookies', 'cookies.txt'])
 
-        if FORMAT == 'mp3':
-            opts.extend([
-                '--format', 'bestaudio/best',
-                '--extract-audio',
-                '--audio-format', 'mp3',
-                '--audio-quality', '0',
-                '--embed-metadata',
-                '--embed-thumbnail',
-                '--convert-thumbnails', 'jpg'
-            ])
-        else:
-            opts.extend([
-                '--format', DYNAMIC_QUALITY_STRING,
-                '--merge-output-format', 'mp4',
-                '--embed-metadata'
-            ])
-            if GET_SUBS and include_subs:
-                opts.extend([
-                    '--write-subs',
-                    '--write-auto-subs',
-                    '--sub-langs', 'fa,en',
-                    '--embed-subs',
-                    '--compat-options', 'no-keep-subs'
-                ])
-
-        opts.extend(cookies_args)
-        opts.append(URL)  # required even with --load-info-json
-        return opts
-
-    max_attempts = 2
-    last_error = None
-    for attempt in range(1, max_attempts + 1):
-        try:
-            print(f"⏳ Phase 2/2: downloading media (attempt {attempt}/{max_attempts})...", flush=True)
-            subprocess.run(build_download_opts(include_subs=True), check=True)
-            last_error = None
-            break
-        except subprocess.CalledProcessError as e:
-            last_error = e
-            print(f"❌ Download attempt {attempt}/{max_attempts} failed.", flush=True)
-            if attempt < max_attempts:
-                backoff = 15 * attempt
-                print(f"⏳ Retrying in {backoff}s (metadata/comments will NOT be re-fetched)...", flush=True)
-                time.sleep(backoff)
-
-    # Safety net: if subtitles are the reason it keeps failing, don't let
-    # that block delivering the actual video — try once more with no subs.
-    if last_error is not None and FORMAT != 'mp3' and GET_SUBS:
-        print("⏳ Still failing — retrying once with subtitles disabled to guarantee delivery...", flush=True)
-        try:
-            subprocess.run(build_download_opts(include_subs=False), check=True)
-            last_error = None
-        except subprocess.CalledProcessError as e:
-            last_error = e
-
-    if last_error is not None:
-        print("❌ Download crashed after all retries. Check the verbose logs above.", flush=True)
-        send_text_to_bale("❌ خطا در دانلود ویدیو پس از چند تلاش. لطفاً بعداً دوباره امتحان کنید.")
-        sys.exit(1)
+    ydl_opts.append(URL)
+    
+    try:
+        subprocess.run(ydl_opts, check=True)
+    except subprocess.CalledProcessError:
+        send_text_to_bale("❌ خطا در دانلود ویدیو. لطفاً بعداً دوباره تلاش کنید.")
+        return
     
     if FORMAT == 'mp3':
         files = glob.glob("temp_download.mp3")
@@ -326,12 +256,10 @@ def main():
         files = glob.glob("temp_download.mp4") + glob.glob("temp_download.webm") + glob.glob("temp_download.mkv")
         
     if not files:
-        print("Download failed: No media file found.", flush=True)
         send_text_to_bale("❌ هیچ فایل رسانه‌ای پیدا نشد.")
-        sys.exit(1)
+        return
     
     media_file = files[0]
-    print(f"Download complete: {media_file}", flush=True)
 
     # Description Sender
     desc_file = "temp_download.description"
@@ -368,24 +296,9 @@ def main():
                             else:
                                 f.write(f"👤 {author} ({likes} likes):\n  {text}\n\n")
                                 
-                    print(f"Uploading {comments_file_path} to Bale...", flush=True)
                     url = f"https://tapi.bale.ai/bot{BALE_TOKEN}/sendDocument"
                     with open(comments_file_path, 'rb') as f:
-                        for attempt in range(4):
-                            try:
-                                response = requests.post(
-                                    url,
-                                    data={'chat_id': CHAT_ID, 'caption': "💬 کامنت‌ها و پاسخ‌ها"},
-                                    files={'document': f},
-                                    timeout=150,
-                                    verify=False
-                                )
-                                response.raise_for_status()
-                                print(f"✅ Successfully sent {comments_file_path}", flush=True)
-                                break
-                            except Exception as e:
-                                print(f"❌ Comment upload attempt {attempt+1} failed: {e}", flush=True)
-                                time.sleep(5)
+                        requests.post(url, data={'chat_id': CHAT_ID, 'caption': "💬 کامنت‌ها و پاسخ‌ها"}, files={'document': f}, timeout=150, verify=False)
             except Exception as e:
                 print(f"Failed to parse comments: {e}", flush=True)
 
@@ -399,17 +312,5 @@ def main():
     if FORMAT != 'mp3' and 0 < actual_height < target_height:
         send_text_to_bale(f"⚠️ کیفیت {TARGET_QUALITY} موجود نبود، به همین دلیل کیفیت {actual_height}p دانلود شد.")
 
-    print("🎉 Pipeline finished.", flush=True)
-
 if __name__ == "__main__":
-    try:
-        main()
-    except SystemExit:
-        raise
-    except Exception as e:
-        print(f"💥 Unhandled crash: {e}", flush=True)
-        try:
-            send_text_to_bale(f"❌ خطای غیرمنتظره در پردازش: {e}")
-        except Exception:
-            pass
-        sys.exit(1)
+    main()
