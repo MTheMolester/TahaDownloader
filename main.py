@@ -242,7 +242,7 @@ def main():
             ydl_opts.extend([
                 '--write-subs',
                 '--write-auto-subs',
-                '--sub-langs', 'fa.*,en.*',
+                '--sub-langs', 'fa,en',
                 '--embed-subs',
                 '--compat-options', 'no-keep-subs'
             ])
@@ -252,7 +252,7 @@ def main():
 
     ydl_opts.append(URL)
 
-    max_attempts = 3
+    max_attempts = 2
     last_error = None
     for attempt in range(1, max_attempts + 1):
         try:
