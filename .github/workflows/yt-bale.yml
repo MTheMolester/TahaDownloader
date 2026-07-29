@@ -39,6 +39,10 @@ on:
         description: 'Download Thumbnail'
         required: false
         type: string
+      MESSAGE_ID:
+        description: 'Bale Message ID to edit'
+        required: false
+        type: string
 
 jobs:
   download_and_send:
@@ -79,5 +83,6 @@ jobs:
           GET_COMMENTS: ${{ github.event.inputs.GET_COMMENTS }}
           GET_DESC: ${{ github.event.inputs.GET_DESC }}
           GET_THUMBNAIL: ${{ github.event.inputs.GET_THUMBNAIL }}
+          MESSAGE_ID: ${{ github.event.inputs.MESSAGE_ID }}
           BALE_TOKEN: ${{ secrets.BALE_TOKEN }}
         run: python main.py
