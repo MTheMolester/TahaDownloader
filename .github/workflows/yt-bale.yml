@@ -10,15 +10,7 @@ on:
       PLATFORM:
         description: 'Target Platform'
         required: true
-        default: 'youtube'
-        type: choice
-        options:
-          - 'youtube'
-          - 'instagram'
-          - 'tiktok'
-          - 'twitter'
-          - 'reddit'
-          - 'other'
+        type: string
       CHAT_ID:
         description: 'Bale Chat ID'
         required: true
@@ -26,32 +18,27 @@ on:
       YT_QUALITY:
         description: 'Target Quality'
         required: false
-        default: '1080p'
-        type: choice
-        options:
-          - '8K'
-          - '4K'
-          - '1080p'
-          - '720p'
-          - '480p'
-          - '360p'
-          - '240p'
+        type: string
       YT_FORMAT:
         description: 'Format'
         required: false
-        default: 'mp4'
-        type: choice
-        options:
-          - 'mp4'
-          - 'mp3'
+        type: string
       GET_SUBS:
         description: 'Embed Subtitles'
         required: false
-        default: 'true'
-        type: choice
-        options:
-          - 'true'
-          - 'false'
+        type: string
+      GET_COMMENTS:
+        description: 'Download Comments'
+        required: false
+        type: string
+      GET_DESC:
+        description: 'Download Description'
+        required: false
+        type: string
+      GET_THUMBNAIL:
+        description: 'Download Thumbnail'
+        required: false
+        type: string
 
 jobs:
   download_and_send:
@@ -89,5 +76,8 @@ jobs:
           YT_QUALITY: ${{ github.event.inputs.YT_QUALITY }}
           CHAT_ID: ${{ github.event.inputs.CHAT_ID }}
           GET_SUBS: ${{ github.event.inputs.GET_SUBS }}
+          GET_COMMENTS: ${{ github.event.inputs.GET_COMMENTS }}
+          GET_DESC: ${{ github.event.inputs.GET_DESC }}
+          GET_THUMBNAIL: ${{ github.event.inputs.GET_THUMBNAIL }}
           BALE_TOKEN: ${{ secrets.BALE_TOKEN }}
         run: python main.py
