@@ -166,10 +166,12 @@ def send_to_bale(file_path, part, total):
     
     url = f"https://tapi.bale.ai/bot{BALE_TOKEN}/{endpoint}"
     filename = Path(file_path).name
+    actual_size_mb = os.path.getsize(file_path) / (1024 * 1024)
     
     # Farsi caption formatting
     caption_text = f"📂 {filename}\n(بخش {part} از {total})"
     
+    print(f"Uploading {filename} ({actual_size_mb:.2f} MB) via {endpoint}...", flush=True)
     with open(file_path, 'rb') as f:
         for attempt in range(4):
             try:
@@ -181,6 +183,7 @@ def send_to_bale(file_path, part, total):
                     verify=False 
                 )
                 response.raise_for_status()
+                print(f"✅ Successfully sent {filename}", flush=True)
                 break
             except requests.exceptions.RequestException as e:
                 print(f"❌ Upload attempt {attempt+1} failed: {e}", flush=True)
@@ -188,12 +191,14 @@ def send_to_bale(file_path, part, total):
 
 def main():
     if not URL:
-        return
+        print("❌ No URL provided by GitHub Actions!", flush=True)
+        sys.exit(1)
         
     ydl_opts = [
         sys.executable, '-m', 'yt_dlp',
         '--output', 'temp_download.%(ext)s',
         '--no-check-certificates',
+        '--verbose',
         '--impersonate', 'chrome',
         '--retries', '10', 
         '--fragment-retries', '10', 
@@ -201,7 +206,10 @@ def main():
         '--force-ipv4', 
         '--legacy-server-connect',
         '--no-playlist',
-        '--write-description'
+        '--write-description',
+        '--sleep-requests', '1',
+        '--sleep-subtitles', '5',
+        '--retry-sleep', 'extractor:linear=1:10:2'
     ]
 
     if PLATFORM == 'youtube':
@@ -243,12 +251,27 @@ def main():
         ydl_opts.extend(['--cookies', 'cookies.txt'])
 
     ydl_opts.append(URL)
-    
-    try:
-        subprocess.run(ydl_opts, check=True)
-    except subprocess.CalledProcessError:
-        send_text_to_bale("❌ خطا در دانلود ویدیو. لطفاً بعداً دوباره تلاش کنید.")
-        return
+
+    max_attempts = 3
+    last_error = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            print(f"⏳ yt-dlp attempt {attempt}/{max_attempts}...", flush=True)
+            subprocess.run(ydl_opts, check=True)
+            last_error = None
+            break
+        except subprocess.CalledProcessError as e:
+            last_error = e
+            print(f"❌ yt-dlp attempt {attempt}/{max_attempts} failed.", flush=True)
+            if attempt < max_attempts:
+                backoff = 15 * attempt
+                print(f"⏳ Retrying in {backoff}s...", flush=True)
+                time.sleep(backoff)
+
+    if last_error is not None:
+        print("❌ yt-dlp crashed after all retries. Check the verbose logs above.", flush=True)
+        send_text_to_bale("❌ خطا در دانلود ویدیو پس از چند تلاش. لطفاً بعداً دوباره امتحان کنید.")
+        sys.exit(1)
     
     if FORMAT == 'mp3':
         files = glob.glob("temp_download.mp3")
@@ -256,10 +279,12 @@ def main():
         files = glob.glob("temp_download.mp4") + glob.glob("temp_download.webm") + glob.glob("temp_download.mkv")
         
     if not files:
+        print("Download failed: No media file found.", flush=True)
         send_text_to_bale("❌ هیچ فایل رسانه‌ای پیدا نشد.")
-        return
+        sys.exit(1)
     
     media_file = files[0]
+    print(f"Download complete: {media_file}", flush=True)
 
     # Description Sender
     desc_file = "temp_download.description"
@@ -296,9 +321,24 @@ def main():
                             else:
                                 f.write(f"👤 {author} ({likes} likes):\n  {text}\n\n")
                                 
+                    print(f"Uploading {comments_file_path} to Bale...", flush=True)
                     url = f"https://tapi.bale.ai/bot{BALE_TOKEN}/sendDocument"
                     with open(comments_file_path, 'rb') as f:
-                        requests.post(url, data={'chat_id': CHAT_ID, 'caption': "💬 کامنت‌ها و پاسخ‌ها"}, files={'document': f}, timeout=150, verify=False)
+                        for attempt in range(4):
+                            try:
+                                response = requests.post(
+                                    url,
+                                    data={'chat_id': CHAT_ID, 'caption': "💬 کامنت‌ها و پاسخ‌ها"},
+                                    files={'document': f},
+                                    timeout=150,
+                                    verify=False
+                                )
+                                response.raise_for_status()
+                                print(f"✅ Successfully sent {comments_file_path}", flush=True)
+                                break
+                            except Exception as e:
+                                print(f"❌ Comment upload attempt {attempt+1} failed: {e}", flush=True)
+                                time.sleep(5)
             except Exception as e:
                 print(f"Failed to parse comments: {e}", flush=True)
 
@@ -312,5 +352,17 @@ def main():
     if FORMAT != 'mp3' and 0 < actual_height < target_height:
         send_text_to_bale(f"⚠️ کیفیت {TARGET_QUALITY} موجود نبود، به همین دلیل کیفیت {actual_height}p دانلود شد.")
 
+    print("🎉 Pipeline finished.", flush=True)
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception as e:
+        print(f"💥 Unhandled crash: {e}", flush=True)
+        try:
+            send_text_to_bale(f"❌ خطای غیرمنتظره در پردازش: {e}")
+        except Exception:
+            pass
+        sys.exit(1)
