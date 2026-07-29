@@ -16,9 +16,12 @@ GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
 GITHUB_REPO = os.environ["GITHUB_REPO"]
 GITHUB_WORKFLOW_FILE = os.environ.get("GITHUB_WORKFLOW_FILE", "yt-bale.yml")
 GITHUB_REF = os.environ.get("GITHUB_REF", "main")
-YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY")  # The new API Key!
+YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY")
 
+# The Force Join variable!
+REQUIRED_CHANNEL = os.environ.get("REQUIRED_CHANNEL") 
 ALLOWED_USERS = {u.strip() for u in os.environ.get("ALLOWED_USERS", "").split(",") if u.strip()}
+
 BALE_API = f"https://tapi.bale.ai/bot{BALE_TOKEN}"
 
 app = Flask(__name__)
@@ -52,12 +55,13 @@ def send_photo(chat_id, photo_url, caption, keyboard=None):
         r = requests.post(f"{BALE_API}/sendPhoto", data=payload, files={"photo": ("thumb.jpg", img_data)}, verify=False)
         if not r.ok: raise Exception("Failed to send photo")
     except Exception:
-        # Fallback if image download fails
         send_message(chat_id, f"[🖼 کاور]({photo_url})\n\n{caption}", keyboard)
 
-def answer_callback(callback_query_id, text=None):
+def answer_callback(callback_query_id, text=None, show_alert=False):
     payload = {"callback_query_id": callback_query_id}
-    if text: payload["text"] = text
+    if text: 
+        payload["text"] = text
+        payload["show_alert"] = show_alert
     return api_call("answerCallbackQuery", payload)
 
 def btn(text, data): return {"text": text, "callback_data": data}
@@ -72,6 +76,34 @@ def trigger_workflow(inputs):
     payload = {"ref": GITHUB_REF, "inputs": inputs}
     r = requests.post(url, headers=headers, json=payload, timeout=20)
     return r.status_code == 204, r.text
+
+
+# ── Channel Membership Checker ──────────────────────────────────────────────
+def check_membership(user_id):
+    if not REQUIRED_CHANNEL:
+        return True # Skips if you didn't add the env variable
+        
+    payload = {"chat_id": REQUIRED_CHANNEL, "user_id": user_id}
+    try:
+        r = requests.post(f"{BALE_API}/getChatMember", json=payload, timeout=5)
+        data = r.json()
+        if data.get("ok"):
+            status = data["result"]["status"]
+            if status in ["member", "administrator", "creator"]:
+                return True
+    except Exception:
+        pass
+    return False
+
+def force_join_message(chat_id, message_id=None):
+    channel_link = f"https://ble.ir/{REQUIRED_CHANNEL.replace('@', '')}"
+    text = "⚠️ **برای استفاده از ربات، ابتدا باید در کانال ما عضو شوید!**\n\nپس از عضویت در کانال، روی دکمه «بررسی عضویت» کلیک کنید."
+    kb = [
+        [{"text": "📣 عضویت در کانال", "url": channel_link}],
+        [btn("🔄 بررسی عضویت", "main:check_join")]
+    ]
+    if message_id: edit_message(chat_id, message_id, text, kb)
+    else: send_message(chat_id, text, kb)
 
 
 # ── YouTube API Helpers ─────────────────────────────────────────────────────
@@ -100,7 +132,7 @@ def yt_api(endpoint, params):
     except: return {}
 
 # ── Interactive Menus ───────────────────────────────────────────────────────
-def send_main_menu(chat_id):
+def send_main_menu(chat_id, message_id=None):
     SESSIONS[chat_id] = {"state": "MAIN_MENU", "extras": {"subs": True, "comments": True, "description": True, "thumbnail": True}}
     kb = [
         [btn("🔴 یوتیوب (YouTube)", "main:youtube")],
@@ -108,7 +140,9 @@ def send_main_menu(chat_id):
         [btn("🐦 توییتر / X", "main:twitter"), btn("🤖 ردیت", "main:reddit")],
         [btn("🌐 سایر لینک‌ها (Any Video)", "main:other")]
     ]
-    send_message(chat_id, "👋 **به ربات طاها دانلودر خوش آمدید!**\nلطفاً پلتفرم مورد نظر خود را انتخاب کنید:", kb)
+    text = "👋 **به ربات طاها دانلودر خوش آمدید!**\nلطفاً پلتفرم مورد نظر خود را انتخاب کنید:"
+    if message_id: edit_message(chat_id, message_id, text, kb)
+    else: send_message(chat_id, text, kb)
 
 def send_yt_menu(chat_id, message_id=None):
     SESSIONS[chat_id]["platform"] = "youtube"
@@ -133,7 +167,6 @@ def fetch_preview(chat_id, video_id):
     channel = item["snippet"]["channelTitle"]
     dur = parse_pt_duration(item["contentDetails"]["duration"])
     
-    # Get highest quality thumbnail available
     thumbnails = item["snippet"]["thumbnails"]
     thumb = thumbnails.get("maxres", thumbnails.get("high", thumbnails.get("default")))["url"]
 
@@ -247,6 +280,11 @@ def handle_message(msg):
         send_message(chat_id, "🚫 شما مجاز به استفاده از این ربات نیستید.")
         return
 
+    # 1. FORCE JOIN CHECK FOR TEXT MESSAGES
+    if not check_membership(chat_id):
+        force_join_message(chat_id)
+        return
+
     if text in ("/start", "/help"):
         send_main_menu(chat_id)
         return
@@ -279,7 +317,6 @@ def handle_message(msg):
         yt_search_channels(chat_id, text)
         
     else:
-        # Fallback if they paste a link without clicking a menu
         match = URL_RE.search(text)
         if match:
             url = match.group(0)
@@ -298,17 +335,32 @@ def handle_callback(cq):
     chat_id = str(cq["message"]["chat"]["id"])
     message_id = cq["message"]["message_id"]
     data = cq.get("data", "")
+    
+    # Check the "Verify Membership" button directly
+    if data == "main:check_join":
+        if check_membership(chat_id):
+            answer_callback(cq["id"], "✅ عضویت شما تایید شد!", show_alert=True)
+            send_main_menu(chat_id, message_id)
+        else:
+            answer_callback(cq["id"], "❌ هنوز در کانال عضو نشده‌اید!", show_alert=True)
+        return
+
     answer_callback(cq["id"])
+
+    # 2. FORCE JOIN CHECK FOR ALL OTHER BUTTON CLICKS
+    if not check_membership(chat_id):
+        force_join_message(chat_id, message_id)
+        return
 
     s = SESSIONS.get(chat_id)
     if not s and not data.startswith("main:"):
-        send_main_menu(chat_id)
+        send_main_menu(chat_id, message_id)
         return
 
     kind, _, value = data.partition(":")
 
     if kind == "main":
-        if value == "back": send_main_menu(chat_id)
+        if value == "back": send_main_menu(chat_id, message_id)
         elif value == "youtube": send_yt_menu(chat_id, message_id)
         else:
             SESSIONS.setdefault(chat_id, {})["platform"] = value
@@ -334,9 +386,7 @@ def handle_callback(cq):
         yt_channel_videos(chat_id, value)
         
     elif kind == "preview":
-        if value == "confirm":
-            # Can't easily edit a photo message into a text menu on Bale, so we send a new message
-            ask_format(chat_id) 
+        if value == "confirm": ask_format(chat_id) 
 
     elif kind == "fmt":
         s["format"] = value
@@ -387,7 +437,7 @@ def webhook():
     return jsonify({"ok": True})
 
 @app.route("/")
-def health(): return "Taha Downloader V2 is running!", 200
+def health(): return "Taha Downloader Complete V4 is running!", 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
