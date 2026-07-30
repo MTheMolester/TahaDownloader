@@ -1,9 +1,9 @@
 import os
 import re
-import time
 import json
 import logging
 import requests
+from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -19,7 +19,6 @@ GITHUB_REF = os.environ.get("GITHUB_REF", "main")
 YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY")
 REQUIRED_CHANNEL = os.environ.get("REQUIRED_CHANNEL") 
 
-# New Database & Admin Variables!
 UPSTASH_URL = os.environ.get("UPSTASH_URL")
 UPSTASH_TOKEN = os.environ.get("UPSTASH_TOKEN")
 ADMIN_ID = os.environ.get("ADMIN_ID")
@@ -32,7 +31,7 @@ SESSIONS = {}
 URL_RE = re.compile(r"https?://\S+")
 QUALITIES = ["8K", "4K", "1080p", "720p", "480p", "360p", "240p"]
 
-# ── Database & Admin Logic ──────────────────────────────────────────────────
+# ── Database & CRM Logic ──────────────────────────────────────────────────
 def db_cmd(*args):
     if not UPSTASH_URL or not UPSTASH_TOKEN: return None
     try:
@@ -41,25 +40,32 @@ def db_cmd(*args):
     except Exception: return None
 
 def is_approved(user_id):
-    if user_id == ADMIN_ID: return True
+    if str(user_id) == ADMIN_ID: return True
     return db_cmd("SISMEMBER", "approved_users", str(user_id)) == 1
 
-def approve_user(user_id):
-    db_cmd("SADD", "approved_users", str(user_id))
+def approve_user(user_id): db_cmd("SADD", "approved_users", str(user_id))
+def revoke_user(user_id): db_cmd("SREM", "approved_users", str(user_id))
+def get_all_users(): return db_cmd("SMEMBERS", "approved_users") or []
 
-def revoke_user(user_id):
-    db_cmd("SREM", "approved_users", str(user_id))
+def save_user_info(user_id, name, username):
+    data = json.dumps({"name": name, "username": username}, ensure_ascii=False)
+    db_cmd("SET", f"uinfo:{user_id}", data)
 
-def get_all_users():
-    return db_cmd("SMEMBERS", "approved_users") or []
+def get_user_info(user_id):
+    res = db_cmd("GET", f"uinfo:{user_id}")
+    if res:
+        try: return json.loads(res)
+        except: pass
+    return {"name": str(user_id), "username": ""}
 
-def log_activity(user_id, action):
-    log_entry = f"ID: {user_id} | {action}"
-    db_cmd("LPUSH", "activity_logs", log_entry)
-    db_cmd("LTRIM", "activity_logs", "0", "49") # Keeps the last 50 actions to save space
-
-def get_logs():
-    return db_cmd("LRANGE", "activity_logs", "0", "19") or [] # Retrieves last 20 actions
+def log_history(user_id, action_type, title, channel, thumb, desc, details):
+    ir_time = (datetime.utcnow() + timedelta(hours=3, minutes=30)).strftime("%Y-%m-%d %H:%M")
+    entry = {
+        "type": action_type, "title": title, "channel": channel,
+        "thumb": thumb, "desc": desc, "details": details, "time": ir_time
+    }
+    db_cmd("LPUSH", f"hist:{user_id}", json.dumps(entry, ensure_ascii=False))
+    db_cmd("LTRIM", f"hist:{user_id}", "0", "19") # Keeps last 20 actions per user
 
 # ── Bale API Helpers ────────────────────────────────────────────────────────
 def api_call(method, payload):
@@ -77,6 +83,9 @@ def edit_message(chat_id, message_id, text, keyboard=None):
     payload = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "Markdown"}
     if keyboard is not None: payload["reply_markup"] = {"inline_keyboard": keyboard}
     return api_call("editMessageText", payload)
+
+def delete_message(chat_id, message_id):
+    return api_call("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
 
 def send_photo(chat_id, photo_url, caption, keyboard=None):
     try:
@@ -126,10 +135,10 @@ def send_admin_menu(chat_id, message_id=None):
     SESSIONS[chat_id] = {"state": "ADMIN_MENU"}
     kb = [
         [btn("➕ افزودن کاربر", "admin:add"), btn("➖ حذف کاربر", "admin:rev")],
-        [btn("👥 کاربران مجاز", "admin:list"), btn("📊 گزارش فعالیت", "admin:logs")],
+        [btn("👥 لیست کاربران مجاز", "admin:list")],
         [btn("🔙 خروج از پنل", "main:back")]
     ]
-    text = "👑 **پنل مدیریت ربات**\nاز گزینه‌های زیر برای مدیریت دسترسی و لاگ‌ها استفاده کنید:"
+    text = "👑 **پنل مدیریت پیشرفته CRM**\nاز گزینه‌های زیر برای مدیریت کاربران و بررسی فعالیت‌ها استفاده کنید:"
     if message_id: edit_message(chat_id, message_id, text, kb)
     else: send_message(chat_id, text, kb)
 
@@ -179,8 +188,13 @@ def fetch_preview(chat_id, video_id):
     item = data["items"][0]
     title, channel = item["snippet"]["title"], item["snippet"]["channelTitle"]
     dur = parse_pt_duration(item["contentDetails"]["duration"])
+    desc = item["snippet"].get("description", "")[:150] + "..."
     thumb = item["snippet"]["thumbnails"].get("maxres", item["snippet"]["thumbnails"].get("high", item["snippet"]["thumbnails"].get("default")))["url"]
+    
+    # Save exact rich data to session for the logger later
     SESSIONS[chat_id]["url"] = f"https://youtu.be/{video_id}"
+    SESSIONS[chat_id]["vid_info"] = {"title": title, "channel": channel, "thumb": thumb, "desc": desc}
+    
     kb = [[btn("✅ تایید و انتخاب کیفیت", "preview:confirm"), btn("❌ انصراف", "main:back")]]
     send_photo(chat_id, thumb, f"🎬 **عنوان:** {title}\n👤 **کانال:** {channel}\n⏱ **زمان:** {dur}", kb)
 
@@ -229,6 +243,11 @@ def handle_message(msg):
     user_id = str(msg.get("from", {}).get("id", chat_id))
     text = (msg.get("text") or "").strip()
 
+    # Capture User Info silently for the CRM
+    first_name = msg.get("from", {}).get("first_name", "کاربر")
+    username = msg.get("from", {}).get("username", "")
+    save_user_info(user_id, first_name, username)
+
     if not check_membership(user_id): return force_join_message(chat_id)
         
     if text == "/admin":
@@ -271,7 +290,7 @@ def handle_message(msg):
             
     elif state == "WAITING_YT_SEARCH":
         send_message(chat_id, "⏳ در حال جستجو...")
-        log_activity(user_id, f"Searched Video: {text}")
+        log_history(user_id, "search", f"جستجوی ویدیو: {text}", "-", "", "-", {})
         data = yt_api("search", {"part": "snippet", "type": "video", "q": text, "maxResults": 5})
         if not data or not data.get("items"): return send_message(chat_id, "❌ هیچ ویدیویی پیدا نشد.")
         kb = [[btn(f"🎬 {i['snippet']['title'][:35]}", f"vid:{i['id']['videoId']}")] for i in data["items"]]
@@ -280,7 +299,7 @@ def handle_message(msg):
         
     elif state == "WAITING_YT_CHANNEL":
         send_message(chat_id, "⏳ در حال جستجوی کانال...")
-        log_activity(user_id, f"Searched Channel: {text}")
+        log_history(user_id, "search", f"جستجوی کانال: {text}", "-", "", "-", {})
         data = yt_api("search", {"part": "snippet", "type": "channel", "q": text, "maxResults": 5})
         if not data or not data.get("items"): return send_message(chat_id, "❌ هیچ کانالی پیدا نشد.")
         kb = [[btn(f"👤 {i['snippet']['title']}", f"chan:{i['snippet']['channelId']}")] for i in data["items"]]
@@ -320,7 +339,7 @@ def handle_callback(cq):
     if not is_approved(user_id) and user_id != ADMIN_ID: return access_denied_message(chat_id, user_id, message_id)
 
     s = SESSIONS.get(chat_id)
-    if not s and not data.startswith("main:") and not data.startswith("admin:"): return send_main_menu(chat_id, message_id)
+    if not s and not data.startswith("main:") and not data.startswith("admin"): return send_main_menu(chat_id, message_id)
 
     kind, _, value = data.partition(":")
 
@@ -333,14 +352,72 @@ def handle_callback(cq):
             SESSIONS[chat_id] = {"state": "WAITING_ADMIN_REV"}
             edit_message(chat_id, message_id, "➖ شناسه (ID) کاربری که می‌خواهید حذف کنید را ارسال کنید:")
         elif value == "list":
-            users = get_all_users()
-            u_list = "\n".join([f"👤 `{u}`" for u in users]) if users else "خالی"
-            edit_message(chat_id, message_id, f"👥 **لیست کاربران مجاز:**\n\n{u_list}", [[btn("🔙 بازگشت به پنل", "admin:back")]])
-        elif value == "logs":
-            logs = get_logs()
-            l_list = "\n".join([f"🔸 {l}" for l in logs]) if logs else "خالی"
-            edit_message(chat_id, message_id, f"📊 **آخرین فعالیت‌ها:**\n\n{l_list}", [[btn("🔙 بازگشت به پنل", "admin:back")]])
-        elif value == "back": send_admin_menu(chat_id, message_id)
+            users = list(get_all_users())[:30] # Limit to 30 buttons to avoid UI crash
+            kb = []
+            for u in users:
+                u_info = get_user_info(u)
+                label = f"👤 {u_info.get('name')} (@{u_info.get('username')})" if u_info.get('username') else f"👤 {u_info.get('name')}"
+                kb.append([btn(label, f"admin_u:{u}")])
+            kb.append([btn("🔙 بازگشت به پنل اصلی", "admin:back")])
+            
+            # Use delete & new message to safely switch from photo panels back to text panels
+            delete_message(chat_id, message_id)
+            send_message(chat_id, "👥 **لیست کاربران مجاز:**\nبرای مشاهده تاریخچه، روی نام کاربر کلیک کنید.", kb)
+        elif value == "back":
+            delete_message(chat_id, message_id)
+            send_admin_menu(chat_id)
+
+    # CRM USER HISTORY VIEWER
+    elif kind == "admin_u":
+        if user_id != ADMIN_ID: return
+        target_user = value
+        history_raw = db_cmd("LRANGE", f"hist:{target_user}", "0", "9")
+        kb = []
+        for i, h_str in enumerate(history_raw or []):
+            try:
+                h = json.loads(h_str)
+                title = h.get("title", "Unknown")[:30]
+                icon = "🎬" if h.get("type") == "download" else "🔍"
+                kb.append([btn(f"{icon} {title}", f"admin_h:{target_user}:{i}")])
+            except: pass
+        kb.append([btn("🔙 بازگشت به لیست", "admin:list")])
+        
+        u_info = get_user_info(target_user)
+        text = f"🗂 **تاریخچه فعالیت کاربر:**\n👤 {u_info.get('name')} (@{u_info.get('username')})"
+        delete_message(chat_id, message_id)
+        send_message(chat_id, text, kb)
+        
+    # CRM DETAILED VIDEO REPORT
+    elif kind == "admin_h":
+        if user_id != ADMIN_ID: return
+        target_user, _, index = value.partition(":")
+        history_raw = db_cmd("LINDEX", f"hist:{target_user}", index)
+        if not history_raw: return
+        
+        h = json.loads(history_raw)
+        d = h.get("details", {})
+        
+        lines = [
+            f"🎬 **عنوان:** {h.get('title', '-')}",
+            f"👤 **کانال:** {h.get('channel', '-')}",
+            f"📝 **توضیحات:** {h.get('desc', '-')}\n",
+            "⚙️ **تنظیمات دانلود:**",
+            f"🔗 پلتفرم: {d.get('platform', '-')}",
+            f"📦 فرمت: {d.get('format', '-')}",
+        ]
+        if d.get("format") == "mp4": lines.append(f"🎚 کیفیت: {d.get('quality', '-')}")
+        
+        ex = d.get("extras", {})
+        if ex:
+            lines.append(f"🔤 زیرنویس: {'✅' if ex.get('subs') else '❌'}")
+            lines.append(f"💬 کامنت‌ها: {'✅' if ex.get('comments') else '❌'}")
+            lines.append(f"🖼 کاور: {'✅' if ex.get('thumbnail') else '❌'}")
+            
+        lines.append(f"\n🕒 **زمان:** {h.get('time', '-')}")
+        
+        kb = [[btn("🔙 بازگشت به تاریخچه کاربر", f"admin_u:{target_user}")]]
+        delete_message(chat_id, message_id)
+        send_photo(chat_id, h.get("thumb", ""), "\n".join(lines), kb)
 
     elif kind == "main":
         if value == "back": send_main_menu(chat_id, message_id)
@@ -392,7 +469,19 @@ def handle_callback(cq):
     elif kind == "confirm":
         if value == "extras": return ask_confirm(chat_id, message_id)
         if value == "go":
-            log_activity(user_id, f"Download: {s['platform']} | {s['url']}")
+            
+            # Log the deep data to the CRM before triggering the download
+            vid_title = s.get("vid_info", {}).get("title", s.get("url", "لینک ناشناس"))
+            vid_channel = s.get("vid_info", {}).get("channel", "-")
+            vid_desc = s.get("vid_info", {}).get("desc", "-")
+            vid_thumb = s.get("vid_info", {}).get("thumb", "https://via.placeholder.com/600x400.png?text=No+Thumbnail")
+            
+            log_history(
+                user_id=user_id, action_type="download", title=vid_title, channel=vid_channel, 
+                thumb=vid_thumb, desc=vid_desc, 
+                details={"platform": s["platform"], "format": s["format"], "quality": s.get("quality"), "extras": s["extras"]}
+            )
+            
             e = s["extras"]
             inputs = {
                 "YT_URL": s["url"], "PLATFORM": s["platform"], "CHAT_ID": chat_id,
@@ -417,7 +506,7 @@ def webhook():
     return jsonify({"ok": True})
 
 @app.route("/")
-def health(): return "Taha Downloader V6 + Admin DB running!", 200
+def health(): return "Taha Downloader Ultimate CRM running!", 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
