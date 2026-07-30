@@ -29,6 +29,7 @@ app = Flask(__name__)
 SESSIONS = {}
 
 URL_RE = re.compile(r"https?://\S+")
+TIME_RE = re.compile(r"^\d{1,2}:\d{2}(:\d{2})?$") # Matches 1:30 or 01:30:45
 QUALITIES = ["8K", "4K", "1080p", "720p", "480p", "360p", "240p"]
 
 # ── Database & CRM Logic ──────────────────────────────────────────────────
@@ -65,7 +66,7 @@ def log_history(user_id, action_type, title, channel, thumb, desc, details):
         "thumb": thumb, "desc": desc, "details": details, "time": ir_time
     }
     db_cmd("LPUSH", f"hist:{user_id}", json.dumps(entry, ensure_ascii=False))
-    db_cmd("LTRIM", f"hist:{user_id}", "0", "19") # Keeps last 20 actions per user
+    db_cmd("LTRIM", f"hist:{user_id}", "0", "19") 
 
 # ── Bale API Helpers ────────────────────────────────────────────────────────
 def api_call(method, payload):
@@ -143,7 +144,7 @@ def send_admin_menu(chat_id, message_id=None):
     else: send_message(chat_id, text, kb)
 
 def send_main_menu(chat_id, message_id=None):
-    SESSIONS[chat_id] = {"state": "MAIN_MENU", "extras": {"subs": True, "comments": True, "description": True, "thumbnail": True}}
+    SESSIONS[chat_id] = {"state": "MAIN_MENU", "extras": {"subs": True, "comments": True, "description": True, "thumbnail": True, "trim_start": None, "trim_end": None}}
     kb = [
         [btn("🔴 یوتیوب (YouTube)", "main:youtube")],
         [btn("🎵 تیک‌تاک", "main:tiktok"), btn("📸 اینستاگرام", "main:instagram")],
@@ -191,7 +192,6 @@ def fetch_preview(chat_id, video_id):
     desc = item["snippet"].get("description", "")[:150] + "..."
     thumb = item["snippet"]["thumbnails"].get("maxres", item["snippet"]["thumbnails"].get("high", item["snippet"]["thumbnails"].get("default")))["url"]
     
-    # Save exact rich data to session for the logger later
     SESSIONS[chat_id]["url"] = f"https://youtu.be/{video_id}"
     SESSIONS[chat_id]["vid_info"] = {"title": title, "channel": channel, "thumb": thumb, "desc": desc}
     
@@ -216,11 +216,19 @@ def ask_extras(chat_id, message_id):
     def check(key): return "✅" if e.get(key) else "❌"
 
     kb = []
+    
+    # ✂️ The New Trim Button!
+    trim_lbl = f"✂️ برش ({e['trim_start']} تا {e['trim_end']})" if e.get("trim_start") else "✂️ برش ویدیو (کلیک کنید)"
+    kb.append([btn(trim_lbl, "trim:toggle")])
+    
     if s.get("format") == "mp4": kb.append([btn(f"{check('subs')} زیرنویس (Subtitles)", "toggle:subs")])
     kb.append([btn(f"{check('comments')} کامنت‌ها", "toggle:comments"), btn(f"{check('description')} توضیحات", "toggle:description")])
     kb.append([btn(f"{check('thumbnail')} (thumbnail) کاور", "toggle:thumbnail")])
     kb.append([btn("🚀 تایید و مرحله بعد", "confirm:extras")])
-    edit_message(chat_id, message_id, "⚙️ **تنظیمات جانبی:**\nبا کلیک روی هر گزینه می‌توانید آن را فعال (✅) یا غیرفعال (❌) کنید:", kb)
+    
+    text = "⚙️ **تنظیمات جانبی:**\nبا کلیک روی هر گزینه می‌توانید آن را تغییر دهید:"
+    if message_id: edit_message(chat_id, message_id, text, kb)
+    else: send_message(chat_id, text, kb)
 
 def ask_confirm(chat_id, message_id):
     s = SESSIONS[chat_id]
@@ -229,6 +237,9 @@ def ask_confirm(chat_id, message_id):
     if s["format"] == "mp4":
         lines.append(f"🎚 کیفیت: `{s['quality']}`")
         lines.append(f"🔤 زیرنویس: `{'دارد' if e['subs'] else 'ندارد'}`")
+        
+    trim_status = f"از {e['trim_start']} تا {e['trim_end']}" if e.get("trim_start") else "ندارد (کل ویدیو)"
+    lines.append(f"✂️ برش: `{trim_status}`")
     lines.append(f"💬 کامنت‌ها: `{'دارد' if e['comments'] else 'ندارد'}`")
     lines.append(f"📝 توضیحات: `{'دارد' if e['description'] else 'ندارد'}`")
     lines.append(f"🖼 کاور: `{'دارد' if e['thumbnail'] else 'ندارد'}`")
@@ -243,7 +254,6 @@ def handle_message(msg):
     user_id = str(msg.get("from", {}).get("id", chat_id))
     text = (msg.get("text") or "").strip()
 
-    # Capture User Info silently for the CRM
     first_name = msg.get("from", {}).get("first_name", "کاربر")
     username = msg.get("from", {}).get("username", "")
     save_user_info(user_id, first_name, username)
@@ -263,8 +273,25 @@ def handle_message(msg):
 
     state = s.get("state")
     
-    # ADMIN PANEL STATES
-    if state == "WAITING_ADMIN_ADD":
+    # Text input handlers for trimming!
+    if state == "WAITING_TRIM_START":
+        if TIME_RE.match(text):
+            s["extras"]["trim_start"] = text
+            s["state"] = "WAITING_TRIM_END"
+            send_message(chat_id, "✅ **حالا زمان پایان را بفرستید.**\nمثال: `02:45`")
+        else:
+            send_message(chat_id, "❌ فرمت اشتباه است. لطفاً مثل `01:30` یا `1:05:20` بفرستید:")
+            
+    elif state == "WAITING_TRIM_END":
+        if TIME_RE.match(text):
+            s["extras"]["trim_end"] = text
+            s["state"] = "EXTRAS_MENU"
+            send_message(chat_id, f"✅ برش تنظیم شد: از {s['extras']['trim_start']} تا {text}")
+            ask_extras(chat_id, None)
+        else:
+            send_message(chat_id, "❌ فرمت اشتباه است. لطفاً مثل `02:45` بفرستید:")
+            
+    elif state == "WAITING_ADMIN_ADD":
         approve_user(text)
         send_message(chat_id, f"✅ کاربر `{text}` با موفقیت تایید شد.")
         send_message(text, "🎉 **دسترسی شما توسط مدیر فعال شد!**\nاکنون می‌توانید با ارسال /start از ربات استفاده کنید.")
@@ -275,7 +302,6 @@ def handle_message(msg):
         send_message(chat_id, f"❌ دسترسی کاربر `{text}` لغو شد.")
         return send_admin_menu(chat_id)
 
-    # USER STATES
     elif state == "WAITING_OTHER_LINK":
         match = URL_RE.search(text)
         if match:
@@ -313,10 +339,10 @@ def handle_message(msg):
             if "youtu" in url:
                 vid_id = extract_yt_id(url)
                 if vid_id: 
-                    SESSIONS[chat_id] = {"platform": "youtube", "extras": {"subs": True, "comments": True, "description": True, "thumbnail": True}}
+                    SESSIONS[chat_id] = {"platform": "youtube", "extras": {"subs": True, "comments": True, "description": True, "thumbnail": True, "trim_start": None, "trim_end": None}}
                     fetch_preview(chat_id, vid_id)
             else:
-                SESSIONS[chat_id] = {"platform": "other", "url": url, "extras": {"subs": False, "comments": False, "description": False, "thumbnail": False}}
+                SESSIONS[chat_id] = {"platform": "other", "url": url, "extras": {"subs": False, "comments": False, "description": False, "thumbnail": False, "trim_start": None, "trim_end": None}}
                 ask_format(chat_id)
         else: send_main_menu(chat_id)
 
@@ -342,8 +368,18 @@ def handle_callback(cq):
     if not s and not data.startswith("main:") and not data.startswith("admin"): return send_main_menu(chat_id, message_id)
 
     kind, _, value = data.partition(":")
-
-    if kind == "admin":
+    
+    # Handle Trim Toggle Button
+    if kind == "trim" and value == "toggle":
+        if s["extras"].get("trim_start"): 
+            s["extras"]["trim_start"] = None
+            s["extras"]["trim_end"] = None
+            ask_extras(chat_id, message_id)
+        else:
+            SESSIONS[chat_id]["state"] = "WAITING_TRIM_START"
+            edit_message(chat_id, message_id, "✂️ **برش ویدیو**\nلطفاً زمان **شروع** برش را بفرستید.\nمثال: `01:15` یا `00:30`")
+            
+    elif kind == "admin":
         if user_id != ADMIN_ID: return
         if value == "add":
             SESSIONS[chat_id] = {"state": "WAITING_ADMIN_ADD"}
@@ -352,22 +388,19 @@ def handle_callback(cq):
             SESSIONS[chat_id] = {"state": "WAITING_ADMIN_REV"}
             edit_message(chat_id, message_id, "➖ شناسه (ID) کاربری که می‌خواهید حذف کنید را ارسال کنید:")
         elif value == "list":
-            users = list(get_all_users())[:30] # Limit to 30 buttons to avoid UI crash
+            users = list(get_all_users())[:30]
             kb = []
             for u in users:
                 u_info = get_user_info(u)
                 label = f"👤 {u_info.get('name')} (@{u_info.get('username')})" if u_info.get('username') else f"👤 {u_info.get('name')}"
                 kb.append([btn(label, f"admin_u:{u}")])
             kb.append([btn("🔙 بازگشت به پنل اصلی", "admin:back")])
-            
-            # Use delete & new message to safely switch from photo panels back to text panels
             delete_message(chat_id, message_id)
             send_message(chat_id, "👥 **لیست کاربران مجاز:**\nبرای مشاهده تاریخچه، روی نام کاربر کلیک کنید.", kb)
         elif value == "back":
             delete_message(chat_id, message_id)
             send_admin_menu(chat_id)
 
-    # CRM USER HISTORY VIEWER
     elif kind == "admin_u":
         if user_id != ADMIN_ID: return
         target_user = value
@@ -387,7 +420,6 @@ def handle_callback(cq):
         delete_message(chat_id, message_id)
         send_message(chat_id, text, kb)
         
-    # CRM DETAILED VIDEO REPORT
     elif kind == "admin_h":
         if user_id != ADMIN_ID: return
         target_user, _, index = value.partition(":")
@@ -413,6 +445,8 @@ def handle_callback(cq):
             lines.append(f"💬 کامنت‌ها: {'✅' if ex.get('comments') else '❌'}")
             lines.append(f"🖼 کاور: {'✅' if ex.get('thumbnail') else '❌'}")
             
+            if ex.get('trim_start'): lines.append(f"✂️ برش: از {ex['trim_start']} تا {ex['trim_end']}")
+            
         lines.append(f"\n🕒 **زمان:** {h.get('time', '-')}")
         
         kb = [[btn("🔙 بازگشت به تاریخچه کاربر", f"admin_u:{target_user}")]]
@@ -425,7 +459,7 @@ def handle_callback(cq):
         else:
             SESSIONS.setdefault(chat_id, {})["platform"] = value
             SESSIONS[chat_id]["state"] = "WAITING_OTHER_LINK"
-            SESSIONS[chat_id]["extras"] = {"subs": True, "comments": True, "description": True, "thumbnail": True}
+            SESSIONS[chat_id]["extras"] = {"subs": True, "comments": True, "description": True, "thumbnail": True, "trim_start": None, "trim_end": None}
             edit_message(chat_id, message_id, f"شما `{value.upper()}` را انتخاب کردید.\n\n🔗 لطفاً لینک ویدیوی خود را ارسال کنید:")
             
     elif kind == "ytm":
@@ -470,7 +504,6 @@ def handle_callback(cq):
         if value == "extras": return ask_confirm(chat_id, message_id)
         if value == "go":
             
-            # Log the deep data to the CRM before triggering the download
             vid_title = s.get("vid_info", {}).get("title", s.get("url", "لینک ناشناس"))
             vid_channel = s.get("vid_info", {}).get("channel", "-")
             vid_desc = s.get("vid_info", {}).get("desc", "-")
@@ -483,11 +516,13 @@ def handle_callback(cq):
             )
             
             e = s["extras"]
+            # Pass the trim times to GitHub!
             inputs = {
                 "YT_URL": s["url"], "PLATFORM": s["platform"], "CHAT_ID": chat_id,
                 "YT_QUALITY": s.get("quality") or "1080p", "YT_FORMAT": s["format"],
                 "GET_SUBS": "true" if e.get("subs") else "false", "GET_COMMENTS": "true" if e.get("comments") else "false",
                 "GET_DESC": "true" if e.get("description") else "false", "GET_THUMBNAIL": "true" if e.get("thumbnail") else "false",
+                "TRIM_START": e.get("trim_start") or "", "TRIM_END": e.get("trim_end") or "",
                 "MESSAGE_ID": str(message_id)
             }
             ok, info = trigger_workflow(inputs)
@@ -506,7 +541,7 @@ def webhook():
     return jsonify({"ok": True})
 
 @app.route("/")
-def health(): return "Taha Downloader Ultimate CRM running!", 200
+def health(): return "Taha Downloader Trim Upgrade running!", 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
