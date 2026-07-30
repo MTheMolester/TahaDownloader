@@ -3,6 +3,14 @@ name: Taha Downloader Bot
 on:
   workflow_dispatch:
     inputs:
+    TRIM_START:
+        description: "Start time for trimming"
+        required: false
+        default: ""
+      TRIM_END:
+        description: "End time for trimming"
+        required: false
+        default: ""
       YT_URL:
         description: 'Media URL'
         required: true
