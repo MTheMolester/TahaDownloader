@@ -39,6 +39,14 @@ on:
         description: 'Download Thumbnail'
         required: false
         type: string
+      TRIM_START:
+        description: 'Start time for trimming'
+        required: false
+        type: string
+      TRIM_END:
+        description: 'End time for trimming'
+        required: false
+        type: string
       MESSAGE_ID:
         description: 'Bale Message ID to edit'
         required: false
@@ -83,6 +91,8 @@ jobs:
           GET_COMMENTS: ${{ github.event.inputs.GET_COMMENTS }}
           GET_DESC: ${{ github.event.inputs.GET_DESC }}
           GET_THUMBNAIL: ${{ github.event.inputs.GET_THUMBNAIL }}
+          TRIM_START: ${{ github.event.inputs.TRIM_START }}
+          TRIM_END: ${{ github.event.inputs.TRIM_END }}
           MESSAGE_ID: ${{ github.event.inputs.MESSAGE_ID }}
           BALE_TOKEN: ${{ secrets.BALE_TOKEN }}
         run: python main.py
