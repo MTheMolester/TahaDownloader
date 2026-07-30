@@ -25,6 +25,10 @@ GET_COMMENTS = os.environ.get('GET_COMMENTS', 'true').lower() == 'true'
 GET_DESC = os.environ.get('GET_DESC', 'true').lower() == 'true'
 GET_THUMBNAIL = os.environ.get('GET_THUMBNAIL', 'true').lower() == 'true'
 
+# Fetch trim variables safely from the GitHub environment
+TRIM_START = os.environ.get('TRIM_START')
+TRIM_END = os.environ.get('TRIM_END')
+
 height_map = {
     '8K': 4320, '4K': 2160, '1080p': 1080,
     '720p': 720, '480p': 480, '360p': 360, '240p': 240
@@ -196,17 +200,23 @@ def main():
     
     if os.path.exists('cookies.txt') and os.path.getsize('cookies.txt') > 0:
         ydl_opts.extend(['--cookies', 'cookies.txt'])
+        
+    # Inject the trimming commands directly into the CLI arguments
+    if TRIM_START and TRIM_END:
+        ydl_opts.extend([
+            '--download-sections', f"*{TRIM_START}-{TRIM_END}",
+            '--force-keyframes-at-cuts'
+        ])
+        
     ydl_opts.append(URL)
     
     try:
-        # Use Popen to read the live stream of the download
         process = subprocess.Popen(ydl_opts, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, bufsize=1)
         last_update = time.time()
         for line in process.stdout:
             print(line, end="")
             if "[download]" in line and "%" in line and "ETA" in line:
                 now = time.time()
-                # Update Bale message roughly every 5 seconds to avoid rate limits
                 if now - last_update > 4.5: 
                     clean_line = line.replace("[download]", "").strip()
                     update_progress(f"⬇️ **در حال دانلود...**\n`{clean_line}`")
