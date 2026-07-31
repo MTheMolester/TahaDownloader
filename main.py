@@ -57,7 +57,7 @@ def get_video_height(file_path):
     try: return int(result.stdout.strip())
     except ValueError: return 0
 
-def split_and_rename(file_path, max_mb=45.0):
+def split_and_rename(file_path, max_mb=24.0):
     size_mb = os.path.getsize(file_path) / (1024 * 1024)
     ext = Path(file_path).suffix
     random_id = uuid.uuid4().hex[:8]  
