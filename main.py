@@ -54,7 +54,8 @@ def get_video_height(file_path):
     try: return int(result.stdout.strip())
     except ValueError: return 0
 
-def split_and_rename(file_path, max_mb=9.5):
+# --- THE BRAND NEW ULTRA-FAST SEGMENTER ---
+def split_and_rename(file_path, max_mb=45.0):
     size_mb = os.path.getsize(file_path) / (1024 * 1024)
     ext = Path(file_path).suffix
     random_id = uuid.uuid4().hex[:8]  
@@ -64,74 +65,35 @@ def split_and_rename(file_path, max_mb=9.5):
         os.rename(file_path, new_name)
         return [new_name]
         
-    update_progress("✂️ **در حال پردازش و برش ویدیو...**\n(چون حجم فایل بالاتر از حد مجاز بله است)")
+    update_progress(f"✂️ **در حال پردازش سریع و برش ویدیو...**\n(حجم فایل: {size_mb:.1f} MB)")
     total_duration = get_duration(file_path)
-    parts, current_start, part_idx = [], 0.0, 0
+    if total_duration <= 0: total_duration = 10.0 
     
-    while current_start < total_duration:
-        estimated_remaining_mb = ((total_duration - current_start) / total_duration) * size_mb
-        
-        if estimated_remaining_mb <= (max_mb * 0.85):
-            out_name = f"temp_{random_id}_{part_idx}{ext}"
-            if os.path.exists(out_name): os.remove(out_name)
-            subprocess.run(['ffmpeg', '-y', '-nostdin', '-ss', str(current_start), '-i', file_path, '-c', 'copy', out_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Calculate exactly how many seconds can safely fit into 45MB based on average bitrate
+    avg_mb_per_sec = size_mb / total_duration
+    safe_segment_time = int((max_mb * 0.85) / avg_mb_per_sec) 
+    if safe_segment_time < 5: safe_segment_time = 5
+    
+    # Use FFmpeg's native segment muxer (Runs in a single fast pass)
+    subprocess.run([
+        'ffmpeg', '-y', '-nostdin', '-i', file_path, 
+        '-c', 'copy', '-f', 'segment', 
+        '-segment_time', str(safe_segment_time), 
+        '-reset_timestamps', '1', 
+        f"{random_id}-part%03d{ext}"
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    
+    parts = sorted(glob.glob(f"{random_id}-part*{ext}"))
+    
+    # Clean up empty files or glitched fragments
+    final_parts = []
+    for p in parts:
+        if os.path.getsize(p) > 100 * 1024: 
+            final_parts.append(p)
+        else:
+            os.remove(p)
             
-            if os.path.exists(out_name) and os.path.getsize(out_name) > 0:
-                chunk_size = os.path.getsize(out_name) / (1024 * 1024)
-                if chunk_size <= max_mb:
-                    final_name = f"{random_id}-part{part_idx:03d}{ext}"
-                    os.rename(out_name, final_name)
-                    parts.append(final_name)
-                    break 
-                else: os.remove(out_name)
-
-        target_mb = max_mb - 1.0 
-        guess_dur = (target_mb / size_mb) * total_duration
-        if guess_dur <= 0: guess_dur = 10.0
-        best_file, best_dur = None, 0.0
-        
-        for attempt in range(12): 
-            out_name = f"temp_{random_id}_{part_idx}{ext}"
-            if os.path.exists(out_name): os.remove(out_name)
-            subprocess.run(['ffmpeg', '-y', '-nostdin', '-ss', str(current_start), '-i', file_path, '-t', str(guess_dur), '-c', 'copy', out_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            chunk_size = os.path.getsize(out_name) / (1024 * 1024) if os.path.exists(out_name) else 0
-
-            if chunk_size == 0:
-                if os.path.exists(out_name): os.remove(out_name)
-                if (current_start + guess_dur) >= (total_duration - 2.0): break 
-                else: guess_dur += 5.0; continue
-
-            if chunk_size > max_mb:
-                os.remove(out_name)
-                guess_dur = guess_dur * (target_mb / chunk_size)
-            else:
-                best_file, best_dur = out_name, guess_dur
-                if chunk_size >= (max_mb - 2.0) or (current_start + guess_dur >= total_duration): break
-                ratio = min((target_mb / max(chunk_size, 0.5)), 2.5) 
-                if ratio < 1.15: ratio = 1.2
-                guess_dur = guess_dur * ratio
-
-        if not best_file or not os.path.exists(best_file):
-            best_file = f"temp_{random_id}_{part_idx}{ext}"
-            best_dur = 5.0
-            subprocess.run(['ffmpeg', '-y', '-nostdin', '-ss', str(current_start), '-i', file_path, '-t', '5', '-c', 'copy', best_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-        if not os.path.exists(best_file) or os.path.getsize(best_file) == 0:
-            if os.path.exists(best_file): os.remove(best_file)
-            break 
-
-        final_name = f"{random_id}-part{part_idx:03d}{ext}"
-        os.rename(best_file, final_name)
-        parts.append(final_name)
-        
-        actual_dur = get_duration(final_name)
-        if actual_dur <= 0.5: actual_dur = best_dur
-            
-        current_start += actual_dur
-        part_idx += 1
-        if actual_dur < 1.0 and (total_duration - current_start) < 2.0: break
-            
-    return parts
+    return final_parts
 
 def send_text_to_bale(message_text):
     url = f"https://tapi.bale.ai/bot{BALE_TOKEN}/sendMessage"
@@ -201,7 +163,6 @@ def main():
     if os.path.exists('cookies.txt') and os.path.getsize('cookies.txt') > 0:
         ydl_opts.extend(['--cookies', 'cookies.txt'])
         
-    # Inject the trimming commands directly into the CLI arguments
     if TRIM_START and TRIM_END:
         ydl_opts.extend([
             '--download-sections', f"*{TRIM_START}-{TRIM_END}",
