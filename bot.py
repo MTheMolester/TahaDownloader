@@ -29,7 +29,7 @@ app = Flask(__name__)
 SESSIONS = {}
 
 URL_RE = re.compile(r"https?://\S+")
-TIME_RE = re.compile(r"^\d{1,2}:\d{2}(:\d{2})?$") # Matches 1:30 or 01:30:45
+TIME_RE = re.compile(r"^\d{1,2}:\d{2}(:\d{2})?$") 
 QUALITIES = ["8K", "4K", "1080p", "720p", "480p", "360p", "240p"]
 
 # ── Database & CRM Logic ──────────────────────────────────────────────────
@@ -131,6 +131,106 @@ def access_denied_message(chat_id, user_id, message_id=None):
     if message_id: edit_message(chat_id, message_id, text)
     else: send_message(chat_id, text)
 
+# ── 🔍 Search Engine 2.0 Logic ──────────────────────────────────────────────
+def yt_api(endpoint, params):
+    params["key"] = YOUTUBE_API_KEY
+    try: return requests.get(f"https://www.googleapis.com/youtube/v3/{endpoint}", params=params, timeout=10).json()
+    except: return {}
+
+def render_search_results(chat_id, message_id, query=None, channel_id=None, page_token=None, page_num=1):
+    params = {"part": "snippet", "type": "video", "maxResults": 5}
+    
+    if query: params["q"] = query
+    if channel_id: 
+        params["channelId"] = channel_id
+        params["order"] = "date"
+    if page_token: params["pageToken"] = page_token
+    
+    data = yt_api("search", params)
+    if not data or not data.get("items"):
+        text = "❌ هیچ ویدیویی پیدا نشد."
+        if message_id: return edit_message(chat_id, message_id, text, [[btn("🔙 بازگشت", "main:back")]])
+        else: return send_message(chat_id, text, [[btn("🔙 بازگشت", "main:back")]])
+
+    items = data["items"]
+    
+    # Save video IDs so the numbered buttons know what to click
+    SESSIONS.setdefault(chat_id, {})["search_results"] = [item["id"]["videoId"] for item in items]
+    
+    header = f"🔍 **نتایج جستجو برای:** `{query}`" if query else "📺 **جدیدترین ویدیوهای کانال:**"
+    lines = [header, f"📄 **صفحه:** {page_num}\n"]
+    
+    numbers = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+    row_numbers = []
+    
+    for i, item in enumerate(items):
+        title = item["snippet"]["title"]
+        channel = item["snippet"]["channelTitle"]
+        pub_date = item["snippet"]["publishTime"][:10]
+        
+        lines.append(f"{numbers[i]} **{title}**")
+        lines.append(f"👤 {channel} | 📅 {pub_date}\n")
+        row_numbers.append(btn(str(i+1), f"res:{i}"))
+        
+    kb = [row_numbers]
+    nav_row = []
+    
+    # Generate infinite pagination tokens
+    if data.get("nextPageToken"):
+        SESSIONS[chat_id]["next_token"] = data["nextPageToken"]
+        nav_row.append(btn("⬅️ بعدی", f"page:next:{page_num+1}"))
+    if data.get("prevPageToken"):
+        SESSIONS[chat_id]["prev_token"] = data["prevPageToken"]
+        nav_row.append(btn("➡️ قبلی", f"page:prev:{page_num-1}"))
+        
+    if nav_row: kb.append(nav_row)
+    kb.append([btn("🔙 بازگشت به منو", "main:back")])
+    
+    text = "\n".join(lines)
+    if message_id: edit_message(chat_id, message_id, text, kb)
+    else: send_message(chat_id, text, kb)
+
+def render_channel_search(chat_id, message_id, query, page_token=None, page_num=1):
+    params = {"part": "snippet", "type": "channel", "q": query, "maxResults": 5}
+    if page_token: params["pageToken"] = page_token
+    
+    data = yt_api("search", params)
+    if not data or not data.get("items"):
+        text = "❌ هیچ کانالی پیدا نشد."
+        if message_id: return edit_message(chat_id, message_id, text, [[btn("🔙 بازگشت", "main:back")]])
+        else: return send_message(chat_id, text, [[btn("🔙 بازگشت", "main:back")]])
+
+    items = data["items"]
+    SESSIONS.setdefault(chat_id, {})["chan_results"] = [item["snippet"]["channelId"] for item in items]
+    
+    lines = [f"👤 **نتایج جستجوی کانال برای:** `{query}`", f"📄 **صفحه:** {page_num}\n"]
+    numbers = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+    row_numbers = []
+    
+    for i, item in enumerate(items):
+        title = item["snippet"]["title"]
+        desc = item["snippet"].get("description", "")[:60] + "..."
+        lines.append(f"{numbers[i]} **{title}**")
+        lines.append(f"📝 {desc}\n")
+        row_numbers.append(btn(str(i+1), f"chan_res:{i}"))
+        
+    kb = [row_numbers]
+    nav_row = []
+    
+    if data.get("nextPageToken"):
+        SESSIONS[chat_id]["chan_next"] = data["nextPageToken"]
+        nav_row.append(btn("⬅️ بعدی", f"cpage:next:{page_num+1}"))
+    if data.get("prevPageToken"):
+        SESSIONS[chat_id]["chan_prev"] = data["prevPageToken"]
+        nav_row.append(btn("➡️ قبلی", f"cpage:prev:{page_num-1}"))
+        
+    if nav_row: kb.append(nav_row)
+    kb.append([btn("🔙 بازگشت به منو", "main:back")])
+    
+    text = "\n".join(lines)
+    if message_id: edit_message(chat_id, message_id, text, kb)
+    else: send_message(chat_id, text, kb)
+
 # ── Interactive Menus ───────────────────────────────────────────────────────
 def send_admin_menu(chat_id, message_id=None):
     SESSIONS[chat_id] = {"state": "ADMIN_MENU"}
@@ -167,11 +267,6 @@ def send_yt_menu(chat_id, message_id=None):
     if message_id: edit_message(chat_id, message_id, text, kb)
     else: send_message(chat_id, text, kb)
 
-def yt_api(endpoint, params):
-    params["key"] = YOUTUBE_API_KEY
-    try: return requests.get(f"https://www.googleapis.com/youtube/v3/{endpoint}", params=params, timeout=10).json()
-    except: return {}
-
 def parse_pt_duration(duration_str):
     m = re.match(r'PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?', duration_str)
     if not m: return "0:00"
@@ -183,7 +278,7 @@ def extract_yt_id(url):
     m = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11}).*", url)
     return m.group(1) if m else None
 
-def fetch_preview(chat_id, video_id):
+def fetch_preview(chat_id, video_id, message_id=None):
     data = yt_api("videos", {"part": "snippet,contentDetails", "id": video_id})
     if not data or not data.get("items"): return send_message(chat_id, "❌ خطا در یافتن ویدیو.")
     item = data["items"][0]
@@ -196,6 +291,8 @@ def fetch_preview(chat_id, video_id):
     SESSIONS[chat_id]["vid_info"] = {"title": title, "channel": channel, "thumb": thumb, "desc": desc}
     
     kb = [[btn("✅ تایید و انتخاب کیفیت", "preview:confirm"), btn("❌ انصراف", "main:back")]]
+    
+    if message_id: delete_message(chat_id, message_id)
     send_photo(chat_id, thumb, f"🎬 **عنوان:** {title}\n👤 **کانال:** {channel}\n⏱ **زمان:** {dur}", kb)
 
 def ask_format(chat_id, message_id=None):
@@ -216,11 +313,8 @@ def ask_extras(chat_id, message_id):
     def check(key): return "✅" if e.get(key) else "❌"
 
     kb = []
-    
-    # ✂️ The New Trim Button!
     trim_lbl = f"✂️ برش ({e['trim_start']} تا {e['trim_end']})" if e.get("trim_start") else "✂️ برش ویدیو (کلیک کنید)"
     kb.append([btn(trim_lbl, "trim:toggle")])
-    
     if s.get("format") == "mp4": kb.append([btn(f"{check('subs')} زیرنویس (Subtitles)", "toggle:subs")])
     kb.append([btn(f"{check('comments')} کامنت‌ها", "toggle:comments"), btn(f"{check('description')} توضیحات", "toggle:description")])
     kb.append([btn(f"{check('thumbnail')} (thumbnail) کاور", "toggle:thumbnail")])
@@ -273,14 +367,12 @@ def handle_message(msg):
 
     state = s.get("state")
     
-    # Text input handlers for trimming!
     if state == "WAITING_TRIM_START":
         if TIME_RE.match(text):
             s["extras"]["trim_start"] = text
             s["state"] = "WAITING_TRIM_END"
             send_message(chat_id, "✅ **حالا زمان پایان را بفرستید.**\nمثال: `02:45`")
-        else:
-            send_message(chat_id, "❌ فرمت اشتباه است. لطفاً مثل `01:30` یا `1:05:20` بفرستید:")
+        else: send_message(chat_id, "❌ فرمت اشتباه است. لطفاً مثل `01:30` بفرستید:")
             
     elif state == "WAITING_TRIM_END":
         if TIME_RE.match(text):
@@ -288,8 +380,7 @@ def handle_message(msg):
             s["state"] = "EXTRAS_MENU"
             send_message(chat_id, f"✅ برش تنظیم شد: از {s['extras']['trim_start']} تا {text}")
             ask_extras(chat_id, None)
-        else:
-            send_message(chat_id, "❌ فرمت اشتباه است. لطفاً مثل `02:45` بفرستید:")
+        else: send_message(chat_id, "❌ فرمت اشتباه است. لطفاً مثل `02:45` بفرستید:")
             
     elif state == "WAITING_ADMIN_ADD":
         approve_user(text)
@@ -317,20 +408,16 @@ def handle_message(msg):
     elif state == "WAITING_YT_SEARCH":
         send_message(chat_id, "⏳ در حال جستجو...")
         log_history(user_id, "search", f"جستجوی ویدیو: {text}", "-", "", "-", {})
-        data = yt_api("search", {"part": "snippet", "type": "video", "q": text, "maxResults": 5})
-        if not data or not data.get("items"): return send_message(chat_id, "❌ هیچ ویدیویی پیدا نشد.")
-        kb = [[btn(f"🎬 {i['snippet']['title'][:35]}", f"vid:{i['id']['videoId']}")] for i in data["items"]]
-        kb.append([btn("🔙 بازگشت", "main:back")])
-        send_message(chat_id, f"🔍 نتایج جستجو برای: `{text}`", kb)
+        SESSIONS[chat_id]["search_query"] = text
+        SESSIONS[chat_id]["search_mode"] = "video"
+        render_search_results(chat_id, None, query=text, page_num=1)
         
     elif state == "WAITING_YT_CHANNEL":
         send_message(chat_id, "⏳ در حال جستجوی کانال...")
         log_history(user_id, "search", f"جستجوی کانال: {text}", "-", "", "-", {})
-        data = yt_api("search", {"part": "snippet", "type": "channel", "q": text, "maxResults": 5})
-        if not data or not data.get("items"): return send_message(chat_id, "❌ هیچ کانالی پیدا نشد.")
-        kb = [[btn(f"👤 {i['snippet']['title']}", f"chan:{i['snippet']['channelId']}")] for i in data["items"]]
-        kb.append([btn("🔙 بازگشت", "main:back")])
-        send_message(chat_id, f"👤 نتایج جستجوی کانال برای: `{text}`", kb)
+        SESSIONS[chat_id]["search_query"] = text
+        SESSIONS[chat_id]["search_mode"] = "channel"
+        render_channel_search(chat_id, None, query=text, page_num=1)
         
     else:
         match = URL_RE.search(text)
@@ -369,8 +456,33 @@ def handle_callback(cq):
 
     kind, _, value = data.partition(":")
     
-    # Handle Trim Toggle Button
-    if kind == "trim" and value == "toggle":
+    # NEW SEARCH PAGINATION & CLICKS
+    if kind == "page":
+        direction, _, p_num = value.partition(":")
+        token = s.get("next_token") if direction == "next" else s.get("prev_token")
+        
+        if s.get("search_mode") == "video":
+            render_search_results(chat_id, message_id, query=s.get("search_query"), channel_id=s.get("search_channel"), page_token=token, page_num=int(p_num))
+            
+    elif kind == "cpage":
+        direction, _, p_num = value.partition(":")
+        token = s.get("chan_next") if direction == "next" else s.get("chan_prev")
+        render_channel_search(chat_id, message_id, query=s.get("search_query"), page_token=token, page_num=int(p_num))
+        
+    elif kind == "res":
+        # User clicked a video number! (1 to 5)
+        vid_id = s.get("search_results", [])[int(value)]
+        fetch_preview(chat_id, vid_id, message_id)
+        
+    elif kind == "chan_res":
+        # User clicked a channel number! Convert UI to show their videos
+        chan_id = s.get("chan_results", [])[int(value)]
+        SESSIONS[chat_id]["search_mode"] = "video"
+        SESSIONS[chat_id]["search_query"] = None
+        SESSIONS[chat_id]["search_channel"] = chan_id
+        render_search_results(chat_id, message_id, channel_id=chan_id, page_num=1)
+        
+    elif kind == "trim" and value == "toggle":
         if s["extras"].get("trim_start"): 
             s["extras"]["trim_start"] = None
             s["extras"]["trim_end"] = None
@@ -444,7 +556,6 @@ def handle_callback(cq):
             lines.append(f"🔤 زیرنویس: {'✅' if ex.get('subs') else '❌'}")
             lines.append(f"💬 کامنت‌ها: {'✅' if ex.get('comments') else '❌'}")
             lines.append(f"🖼 کاور: {'✅' if ex.get('thumbnail') else '❌'}")
-            
             if ex.get('trim_start'): lines.append(f"✂️ برش: از {ex['trim_start']} تا {ex['trim_end']}")
             
         lines.append(f"\n🕒 **زمان:** {h.get('time', '-')}")
@@ -472,15 +583,7 @@ def handle_callback(cq):
         elif value == "search_chan":
             SESSIONS[chat_id]["state"] = "WAITING_YT_CHANNEL"
             edit_message(chat_id, message_id, "👤 نام کانال یوتیوب مورد نظر را بفرستید:")
-            
-    elif kind == "vid": fetch_preview(chat_id, value)
-    elif kind == "chan":
-        data = yt_api("search", {"part": "snippet", "type": "video", "channelId": value, "order": "date", "maxResults": 5})
-        if not data or not data.get("items"): return send_message(chat_id, "❌ این کانال ویدیویی ندارد.")
-        kb = [[btn(f"🎬 {i['snippet']['title'][:40]}", f"vid:{i['id']['videoId']}")] for i in data["items"]]
-        kb.append([btn("🔙 بازگشت", "main:back")])
-        send_message(chat_id, "📺 جدیدترین ویدیوهای این کانال:", kb)
-        
+
     elif kind == "preview":
         if value == "confirm": ask_format(chat_id) 
 
@@ -516,7 +619,6 @@ def handle_callback(cq):
             )
             
             e = s["extras"]
-            # Pass the trim times to GitHub!
             inputs = {
                 "YT_URL": s["url"], "PLATFORM": s["platform"], "CHAT_ID": chat_id,
                 "YT_QUALITY": s.get("quality") or "1080p", "YT_FORMAT": s["format"],
@@ -541,7 +643,7 @@ def webhook():
     return jsonify({"ok": True})
 
 @app.route("/")
-def health(): return "Taha Downloader Trim Upgrade running!", 200
+def health(): return "Taha Downloader Search Engine 2.0 running!", 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
